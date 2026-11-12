@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import axiosInstance from "../../utils/axiosInstance";
 import API_PATHS from "../../utils/apiPaths";
 import { useUser } from "../../context/UserContext";
+import { FiDownload, FiFileText } from "react-icons/fi";
 
 const Dashboard = () => {
     const { user } = useUser();
@@ -10,7 +11,9 @@ const Dashboard = () => {
     const [dashboardData, setDashboardData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
+    const [downloading, setDownloading] = useState("");
 
+    // Fetch dashboard information
     useEffect(() => {
         const fetchDashboardData = async () => {
             try {
@@ -32,6 +35,50 @@ const Dashboard = () => {
         fetchDashboardData();
     }, []);
 
+    // Download Excel reports
+    const handleDownloadReport = async (type) => {
+        try {
+            setDownloading(type);
+            setError("");
+
+            const endpoint =
+                type === "tasks"
+                    ? API_PATHS.REPORTS.EXPORT_TASKS
+                    : API_PATHS.REPORTS.EXPORT_USERS;
+
+            const response = await axiosInstance.get(endpoint, {
+                responseType: "blob",
+            });
+
+            const blob = new Blob([response.data], {
+                type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            });
+
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement("a");
+
+            link.href = url;
+            link.download =
+                type === "tasks"
+                    ? "tasks_report.xlsx"
+                    : "users_report.xlsx";
+
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error("Report download error:", err);
+            setError(
+                "Unable to download report. Please check your login and try again."
+            );
+        } finally {
+            setDownloading("");
+        }
+    };
+
+    // Loading state
     if (loading) {
         return (
             <div className="flex items-center justify-center min-h-screen">
@@ -40,7 +87,8 @@ const Dashboard = () => {
         );
     }
 
-    if (error) {
+    // Error state
+    if (error && !dashboardData) {
         return (
             <div className="p-8 text-red-600">
                 {error}
@@ -52,6 +100,7 @@ const Dashboard = () => {
     const charts = dashboardData?.charts || {};
     const recentTasks = dashboardData?.recentTasks || [];
 
+    // Statistics cards
     const statCards = [
         {
             title: "Total Tasks",
@@ -114,6 +163,54 @@ const Dashboard = () => {
                 </p>
             </div>
 
+            {/* Report downloads */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 mb-8">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+
+                    <div>
+                        <h2 className="text-lg font-semibold text-gray-800">
+                            Download Reports
+                        </h2>
+
+                        <p className="text-sm text-gray-500 mt-1">
+                            Export your task and team member reports.
+                        </p>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-3">
+
+                        <button
+                            onClick={() => handleDownloadReport("tasks")}
+                            disabled={!!downloading}
+                            className="flex items-center justify-center gap-2 px-5 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium disabled:opacity-50"
+                        >
+                            <FiDownload size={17} />
+                            {downloading === "tasks"
+                                ? "Downloading..."
+                                : "Export Tasks"}
+                        </button>
+
+                        <button
+                            onClick={() => handleDownloadReport("users")}
+                            disabled={!!downloading}
+                            className="flex items-center justify-center gap-2 px-5 py-3 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-medium disabled:opacity-50"
+                        >
+                            <FiFileText size={17} />
+                            {downloading === "users"
+                                ? "Downloading..."
+                                : "Export Users"}
+                        </button>
+
+                    </div>
+                </div>
+
+                {error && (
+                    <p className="text-sm text-red-600 mt-4">
+                        {error}
+                    </p>
+                )}
+            </div>
+
             {/* Statistics cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5 mb-8">
 
@@ -156,6 +253,7 @@ const Dashboard = () => {
                                     <span className="text-gray-600">
                                         {item.label}
                                     </span>
+
                                     <span className="font-semibold text-gray-800">
                                         {item.value}
                                     </span>
@@ -187,6 +285,7 @@ const Dashboard = () => {
                                     <span className="text-gray-600">
                                         {item.label} Priority
                                     </span>
+
                                     <span className="font-semibold text-gray-800">
                                         {item.value}
                                     </span>

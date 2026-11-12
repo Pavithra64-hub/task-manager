@@ -1,6 +1,9 @@
-const express = require('express');
+
+const express = require("express");
 const router = express.Router();
-const { protect, adminOnly } = require('../middlewares/authMiddleware');
+
+const { protect, adminOnly } = require("../middlewares/authMiddleware");
+const upload = require("../config/multer");
 
 const {
     getDashboardData,
@@ -11,18 +14,41 @@ const {
     updateTask,
     deleteTask,
     updateTaskStatus,
-    updateTaskChecklist
-} = require('../controllers/taskController');
+    updateTaskChecklist,
+    uploadTaskAttachments,
+    downloadTaskAttachment,
+} = require("../controllers/taskController");
 
-// Task Management Routes
+// Dashboard routes
 router.get("/dashboard-data", protect, getDashboardData);
 router.get("/user-dashboard-data", protect, getUserDashboardData);
-router.get("/", protect, getTasks); // Get all tasks (Admin: all, User: assigned)
+
+// Task management routes
+router.get("/", protect, getTasks);
+
+// Attachment download route
+router.get(
+    "/:id/attachments/:filename",
+    protect,
+    downloadTaskAttachment
+);
+
 router.get("/:id", protect, getTaskById);
-router.post("/", protect, adminOnly, createTask); // Create a task (Admin only)
-router.put("/:id", protect, adminOnly, updateTask); // Update task details
-router.delete("/:id", protect, adminOnly, deleteTask); // Delete a task (Admin only)
-router.put("/:id/status", protect, updateTaskStatus); // Update task status
-router.put("/:id/todo", protect, updateTaskChecklist); // Update task checklist
+router.post("/", protect, adminOnly, createTask);
+router.put("/:id", protect, adminOnly, updateTask);
+router.delete("/:id", protect, adminOnly, deleteTask);
+
+// Status and checklist routes
+router.put("/:id/status", protect, updateTaskStatus);
+router.put("/:id/todo", protect, updateTaskChecklist);
+
+// Attachment upload route (Admin only)
+router.post(
+    "/:id/attachments",
+    protect,
+    adminOnly,
+    upload.array("attachments", 5),
+    uploadTaskAttachments
+);
 
 module.exports = router;

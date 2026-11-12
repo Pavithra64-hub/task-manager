@@ -27,6 +27,10 @@ const ManageTasks = () => {
     });
     const [saving, setSaving] = useState(false);
 
+    // Attachment upload
+    const [uploadingTaskId, setUploadingTaskId] = useState("");
+    const [uploadError, setUploadError] = useState("");
+
     // Fetch all tasks
     const fetchTasks = async () => {
         try {
@@ -51,6 +55,76 @@ const ManageTasks = () => {
     useEffect(() => {
         fetchTasks();
     }, []);
+
+    // Upload attachments
+    const handleAttachmentUpload = async (taskId, e) => {
+        const files = Array.from(e.target.files || []);
+
+        // Reset input so the same file can be selected again
+        e.target.value = "";
+
+        if (files.length === 0) return;
+
+        if (files.length > 5) {
+            setUploadError("You can upload a maximum of 5 files at once.");
+            return;
+        }
+
+        const maxFileSize = 5 * 1024 * 1024;
+
+        const oversizedFile = files.find(
+            (file) => file.size > maxFileSize
+        );
+
+        if (oversizedFile) {
+            setUploadError(
+                `${oversizedFile.name} exceeds the 5 MB file size limit.`
+            );
+            return;
+        }
+
+        const formData = new FormData();
+
+        files.forEach((file) => {
+            formData.append("attachments", file);
+        });
+
+        try {
+            setUploadingTaskId(taskId);
+            setUploadError("");
+
+            const response = await axiosInstance.post(
+                `/tasks/${taskId}/attachments`,
+                formData,
+                {
+                    headers: {
+                        "Content-Type": "multipart/form-data",
+                    },
+                }
+            );
+
+            alert(
+                response.data.message ||
+                "Attachments uploaded successfully."
+            );
+
+            await fetchTasks();
+        } catch (err) {
+            const message =
+                err.response?.data?.message ||
+                err.response?.data ||
+                err.message ||
+                "Unable to upload attachments.";
+
+            setUploadError(
+                typeof message === "string"
+                    ? message
+                    : "Unable to upload attachments."
+            );
+        } finally {
+            setUploadingTaskId("");
+        }
+    };
 
     // Search and filter tasks
     const filteredTasks = useMemo(() => {
@@ -229,6 +303,19 @@ const ManageTasks = () => {
                 </div>
             )}
 
+            {/* Attachment upload error */}
+            {uploadError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-lg mb-6 flex justify-between gap-3">
+                    <span>{uploadError}</span>
+                    <button
+                        onClick={() => setUploadError("")}
+                        className="font-semibold"
+                    >
+                        ×
+                    </button>
+                </div>
+            )}
+
             {/* Task summary */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-7">
 
@@ -372,7 +459,7 @@ const ManageTasks = () => {
                     </div>
                 ) : (
                     <div className="overflow-x-auto">
-                        <table className="w-full min-w-[850px] text-left">
+                        <table className="w-full min-w-[1000px] text-left">
 
                             <thead className="bg-gray-50 text-gray-500 text-sm">
                                 <tr>
@@ -381,6 +468,7 @@ const ManageTasks = () => {
                                     <th className="px-5 py-4">Priority</th>
                                     <th className="px-5 py-4">Status</th>
                                     <th className="px-5 py-4">Due Date</th>
+                                    <th className="px-5 py-4">Attachments</th>
                                     <th className="px-5 py-4">Actions</th>
                                 </tr>
                             </thead>
@@ -436,6 +524,38 @@ const ManageTasks = () => {
                                             {task.dueDate
                                                 ? new Date(task.dueDate).toLocaleDateString()
                                                 : "No date"}
+                                        </td>
+
+                                        {/* Attachment upload */}
+                                        <td className="px-5 py-4">
+                                            <div className="flex flex-col gap-2">
+                                                <span className="text-xs text-gray-500">
+                                                    {task.attachments?.length || 0} file(s)
+                                                </span>
+
+                                                <label
+                                                    className={`inline-flex items-center justify-center px-3 py-2 rounded-md text-sm font-medium cursor-pointer ${
+                                                        uploadingTaskId === task._id
+                                                            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+                                                            : "bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                                                    }`}
+                                                >
+                                                    {uploadingTaskId === task._id
+                                                        ? "Uploading..."
+                                                        : "＋ Upload"}
+
+                                                    <input
+                                                        type="file"
+                                                        multiple
+                                                        accept=".jpg,.jpeg,.png,.webp,.pdf,.doc,.docx,.xls,.xlsx,.txt"
+                                                        className="hidden"
+                                                        disabled={uploadingTaskId === task._id}
+                                                        onChange={(e) =>
+                                                            handleAttachmentUpload(task._id, e)
+                                                        }
+                                                    />
+                                                </label>
+                                            </div>
                                         </td>
 
                                         <td className="px-5 py-4">

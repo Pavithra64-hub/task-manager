@@ -2,186 +2,379 @@
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
-// Generate JWT Token
+// -------------------- CONFIGURATION --------------------
+
+const PASSWORD_MIN_LENGTH = 8;
+
+// -------------------- HELPER FUNCTIONS --------------------
+
+// Generate JWT token.
 const generateToken = (userId) => {
-    return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
-        expiresIn: "7d"
-    });
+    if (!process.env.JWT_SECRET) {
+        throw new Error("JWT_SECRET is not configured.");
+    }
+
+    return jwt.sign(
+        { id: userId.toString() },
+        process.env.JWT_SECRET,
+        {
+            expiresIn: "7d",
+            algorithm: "HS256",
+        }
+    );
 };
 
-// @desc    Register a new user
-// @route   POST /api/auth/register
-// @access  Public
+// Validate email format.
+const isValidEmail = (email) => {
+    return (
+        typeof email === "string" &&
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    );
+};
+
+// Validate password strength.
+const isValidPassword = (password) => {
+    return (
+        typeof password === "string" &&
+        password.length >= PASSWORD_MIN_LENGTH &&
+        password.length <= 128
+    );
+};
+
+// Compare admin invitation tokens safely.
+const isValidAdminInvite = (providedToken) => {
+    const actualToken = process.env.ADMIN_INVITE_TOKEN;
+
+    if (
+        typeof providedToken !== "string" ||
+        !actualToken ||
+        providedToken.length !== actualToken.length
+    ) {
+        return false;
+    }
+
+    return crypto.timingSafeEqual(
+        Buffer.from(providedToken),
+        Buffer.from(actualToken)
+    );
+};
+
+// -------------------- REGISTER USER --------------------
+
+// @desc Register a new user
+// @route POST /api/auth/register
+// @access Public
+
 const registerUser = async (req, res) => {
     try {
         const {
             name,
             email,
             password,
-            profileImageUrl,
-            adminInviteToken
+            adminInviteToken,
         } = req.body;
 
-        // Check if user already exists
-        const userExists = await User.findOne({ email });
-
-        if (userExists) {
+        // Validate name.
+        if (
+            typeof name !== "string" ||
+            !name.trim() ||
+            name.trim().length > 100
+        ) {
             return res.status(400).json({
-                message: "User already exists"
+                message: "Please provide a valid name (maximum 100 characters).",
             });
         }
 
-        // Determine user role
-        let role = "member";
-
-        if (
-            adminInviteToken &&
-            adminInviteToken === process.env.ADMIN_INVITE_TOKEN
-        ) {
-            role = "admin";
+        // Validate email.
+        if (!isValidEmail(email)) {
+            return res.status(400).json({
+                message: "Please provide a valid email address.",
+            });
         }
 
-        // Hash password
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
+        const normalizedEmail = email.trim().toLowerCase();
 
-        // Create new user
-        const user = await User.create({
-            name,
-            email,
-            password: hashedPassword,
-            profileImageUrl,
-            role
+        // Validate password.
+        if (!isValidPassword(password)) {
+            return res.status(400).json({
+                message: "Password must be between 8 and 128 characters.",
+            });
+        }
+
+        // Check JWT configuration.
+        if (!process.env.JWT_SECRET) {
+            return res.status(500).json({
+                message: "Server authentication configuration error.",
+            });
+        }
+
+        // Check whether user already exists.
+        const userExists = await User.findOne({
+            email: normalizedEmail,
         });
 
-        // Return user data with JWT
-        res.status(201).json({
+        if (userExists) {
+            return res.status(409).json({
+                message: "An account with this email already exists.",
+            });
+        }
+
+        // Default role is member.
+        // Only a valid invitation token can create an admin.
+        const role = isValidAdminInvite(adminInviteToken)
+            ? "admin"
+            : "member";
+
+        // Hash password.
+        const hashedPassword = await bcrypt.hash(password, 12);
+
+        // Create user.
+        const user = await User.create({
+            name: name.trim(),
+            email: normalizedEmail,
+            password: hashedPassword,
+            role,
+        });
+
+        // Generate token.
+        const token = generateToken(user._id);
+
+        return res.status(201).json({
+            message: "Registration successful.",
             _id: user._id,
             name: user.name,
             email: user.email,
             profileImageUrl: user.profileImageUrl,
             role: user.role,
-            token: generateToken(user._id)
+            token,
         });
 
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Registration error:", error);
+
+        // Handle duplicate email race conditions.
+        if (error.code === 11000) {
+            return res.status(409).json({
+                message: "An account with this email already exists.",
+            });
+        }
+
+        return res.status(500).json({
+            message: "Unable to register user.",
         });
     }
 };
 
-// @desc    Login user
-// @route   POST /api/auth/login
-// @access  Public
+// -------------------- LOGIN USER --------------------
+
+// @desc Login user
+// @route POST /api/auth/login
+// @access Public
+
 const loginUser = async (req, res) => {
     try {
         const { email, password } = req.body;
 
-        const user = await User.findOne({ email });
-
-        if (!user) {
-            return res.status(401).json({
-                message: "Invalid email or password"
+        if (
+            typeof email !== "string" ||
+            !isValidEmail(email) ||
+            typeof password !== "string" ||
+            !password
+        ) {
+            return res.status(400).json({
+                message: "Please provide a valid email and password.",
             });
         }
 
-        // Compare password
-        const isMatch = await bcrypt.compare(password, user.password);
+        if (!process.env.JWT_SECRET) {
+            return res.status(500).json({
+                message: "Server authentication configuration error.",
+            });
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+
+        // Find user.
+        const user = await User.findOne({
+            email: normalizedEmail,
+        });
+
+        // Use the same response for unknown email and wrong password.
+        if (!user) {
+            return res.status(401).json({
+                message: "Invalid email or password.",
+            });
+        }
+
+        // Compare password.
+        const isMatch = await bcrypt.compare(
+            password,
+            user.password
+        );
 
         if (!isMatch) {
             return res.status(401).json({
-                message: "Invalid email or password"
+                message: "Invalid email or password.",
             });
         }
 
-        // Return user data with JWT
-        res.json({
+        // Generate JWT.
+        const token = generateToken(user._id);
+
+        return res.status(200).json({
+            message: "Login successful.",
             _id: user._id,
             name: user.name,
             email: user.email,
             role: user.role,
             profileImageUrl: user.profileImageUrl,
-            token: generateToken(user._id)
+            token,
         });
 
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Login error:", error);
+
+        return res.status(500).json({
+            message: "Unable to log in.",
         });
     }
 };
 
-// @desc    Get user profile
-// @route   GET /api/auth/profile
-// @access  Private (Requires JWT)
+// -------------------- GET USER PROFILE --------------------
+
+// @desc Get authenticated user profile
+// @route GET /api/auth/profile
+// @access Private
+
 const getUserProfile = async (req, res) => {
     try {
-        const user = await User.findById(req.user.id).select("-password");
+        // protect middleware already fetches the authenticated user.
+        const user = await User.findById(req.user._id).select("-password");
 
         if (!user) {
             return res.status(404).json({
-                message: "User not found"
+                message: "User not found.",
             });
         }
 
-        res.json(user);
+        return res.status(200).json(user);
 
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Get profile error:", error);
+
+        return res.status(500).json({
+            message: "Unable to fetch profile.",
         });
     }
 };
 
-// @desc    Update user profile
-// @route   PUT /api/auth/profile
-// @access  Private (Requires JWT)
+// -------------------- UPDATE USER PROFILE --------------------
+
+// @desc Update authenticated user profile
+// @route PUT /api/auth/profile
+// @access Private
+
 const updateUserProfile = async (req, res) => {
     try {
-        const user = await User.findById(req.user.id);
+        const user = await User.findById(req.user._id);
 
         if (!user) {
             return res.status(404).json({
-                message: "User not found"
+                message: "User not found.",
             });
         }
 
-        user.name = req.body.name || user.name;
-        user.email = req.body.email || user.email;
+        const { name, email, password } = req.body;
 
-        if (req.body.password) {
-            const salt = await bcrypt.genSalt(10);
-            user.password = await bcrypt.hash(req.body.password, salt);
+        // Update name.
+        if (name !== undefined) {
+            if (
+                typeof name !== "string" ||
+                !name.trim() ||
+                name.trim().length > 100
+            ) {
+                return res.status(400).json({
+                    message: "Please provide a valid name.",
+                });
+            }
+
+            user.name = name.trim();
         }
 
+        // Update email.
+        if (email !== undefined) {
+            if (!isValidEmail(email)) {
+                return res.status(400).json({
+                    message: "Please provide a valid email address.",
+                });
+            }
+
+            const normalizedEmail = email.trim().toLowerCase();
+
+            // Check whether another account uses this email.
+            const existingUser = await User.findOne({
+                email: normalizedEmail,
+                _id: { $ne: user._id },
+            });
+
+            if (existingUser) {
+                return res.status(409).json({
+                    message: "This email address is already in use.",
+                });
+            }
+
+            user.email = normalizedEmail;
+        }
+
+        // Update password only when supplied.
+        if (password !== undefined && password !== "") {
+            if (!isValidPassword(password)) {
+                return res.status(400).json({
+                    message: "Password must be between 8 and 128 characters.",
+                });
+            }
+
+            user.password = await bcrypt.hash(password, 12);
+        }
+
+        // Never accept role changes or arbitrary profile fields here.
         const updatedUser = await user.save();
 
-        res.json({
+        // Generate a new token.
+        const token = generateToken(updatedUser._id);
+
+        return res.status(200).json({
+            message: "Profile updated successfully.",
             _id: updatedUser._id,
             name: updatedUser.name,
             email: updatedUser.email,
             profileImageUrl: updatedUser.profileImageUrl,
             role: updatedUser.role,
-            token: generateToken(updatedUser._id)
+            token,
         });
 
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Update profile error:", error);
+
+        if (error.code === 11000) {
+            return res.status(409).json({
+                message: "This email address is already in use.",
+            });
+        }
+
+        return res.status(500).json({
+            message: "Unable to update profile.",
         });
     }
 };
 
-// Export controller functions
+// -------------------- EXPORT CONTROLLERS --------------------
+
 module.exports = {
     registerUser,
     loginUser,
     getUserProfile,
-    updateUserProfile
+    updateUserProfile,
 };

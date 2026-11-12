@@ -11,6 +11,7 @@ const ViewTaskDetails = () => {
     const [task, setTask] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
+    const [downloadingAttachment, setDownloadingAttachment] = useState("");
 
     // Fetch individual task details
     useEffect(() => {
@@ -36,6 +37,41 @@ const ViewTaskDetails = () => {
 
         fetchTaskDetails();
     }, [id]);
+
+    // Download task attachment
+    const handleDownloadAttachment = async (attachment) => {
+        try {
+            const filename = attachment.split("/").pop();
+
+            setDownloadingAttachment(filename);
+
+            const response = await axiosInstance.get(
+                `/tasks/${id}/attachments/${encodeURIComponent(filename)}`,
+                {
+                    responseType: "blob",
+                }
+            );
+
+            const blobUrl = window.URL.createObjectURL(
+                new Blob([response.data])
+            );
+
+            const link = document.createElement("a");
+            link.href = blobUrl;
+            link.download = filename;
+
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+
+            window.URL.revokeObjectURL(blobUrl);
+        } catch (err) {
+            console.error("Attachment download failed:", err);
+            alert("Unable to download attachment. Please try again.");
+        } finally {
+            setDownloadingAttachment("");
+        }
+    };
 
     const getStatusStyle = (status) => {
         switch (status) {
@@ -64,9 +100,10 @@ const ViewTaskDetails = () => {
 
     const totalItems = task?.todoChecklist?.length || 0;
 
-    const progress = totalItems > 0
-        ? Math.round((completedItems / totalItems) * 100)
-        : task?.progress || 0;
+    const progress =
+        totalItems > 0
+            ? Math.round((completedItems / totalItems) * 100)
+            : task?.progress || 0;
 
     if (loading) {
         return (
@@ -99,7 +136,6 @@ const ViewTaskDetails = () => {
 
     return (
         <div className="min-h-screen bg-gray-50 p-5 md:p-8">
-
             <div className="max-w-5xl mx-auto">
 
                 {/* Back button */}
@@ -112,7 +148,6 @@ const ViewTaskDetails = () => {
 
                 {/* Page heading */}
                 <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-4 mb-7">
-
                     <div>
                         <h1 className="text-2xl md:text-3xl font-semibold text-gray-800">
                             Task Details
@@ -129,14 +164,12 @@ const ViewTaskDetails = () => {
                     >
                         Close Details
                     </button>
-
                 </div>
 
                 {/* Main task information */}
                 <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6 md:p-8 mb-6">
 
                     <div className="flex flex-col md:flex-row md:justify-between md:items-start gap-4 mb-6">
-
                         <div>
                             <p className="text-sm text-gray-500 mb-2">
                                 Task title
@@ -148,21 +181,21 @@ const ViewTaskDetails = () => {
                         </div>
 
                         <div className="flex flex-wrap gap-2">
-
-                            <span className={`px-4 py-2 rounded-full text-sm font-medium ${getPriorityStyle(task.priority)}`}>
+                            <span
+                                className={`px-4 py-2 rounded-full text-sm font-medium ${getPriorityStyle(task.priority)}`}
+                            >
                                 {task.priority} Priority
                             </span>
 
-                            <span className={`px-4 py-2 rounded-full text-sm font-medium ${getStatusStyle(task.status)}`}>
+                            <span
+                                className={`px-4 py-2 rounded-full text-sm font-medium ${getStatusStyle(task.status)}`}
+                            >
                                 {task.status}
                             </span>
-
                         </div>
-
                     </div>
 
                     <div className="border-t border-gray-100 pt-6">
-
                         <h3 className="font-semibold text-gray-800 mb-3">
                             Description
                         </h3>
@@ -170,9 +203,7 @@ const ViewTaskDetails = () => {
                         <p className="text-gray-600 leading-7 whitespace-pre-wrap">
                             {task.description || "No description provided."}
                         </p>
-
                     </div>
-
                 </div>
 
                 {/* Task information cards */}
@@ -211,7 +242,6 @@ const ViewTaskDetails = () => {
                             {progress}%
                         </p>
                     </div>
-
                 </div>
 
                 {/* Progress section */}
@@ -237,7 +267,6 @@ const ViewTaskDetails = () => {
                     <p className="text-sm text-gray-500 mt-3">
                         {completedItems} of {totalItems} checklist items completed
                     </p>
-
                 </div>
 
                 {/* Assigned members */}
@@ -255,7 +284,6 @@ const ViewTaskDetails = () => {
                                     key={member._id}
                                     className="flex items-center gap-3 bg-gray-50 rounded-lg p-4"
                                 >
-
                                     <div className="w-11 h-11 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-semibold uppercase">
                                         {member.name?.charAt(0) || "U"}
                                     </div>
@@ -269,7 +297,6 @@ const ViewTaskDetails = () => {
                                             {member.email}
                                         </p>
                                     </div>
-
                                 </div>
                             ))}
 
@@ -279,7 +306,6 @@ const ViewTaskDetails = () => {
                             No assigned members found.
                         </p>
                     )}
-
                 </div>
 
                 {/* Checklist */}
@@ -303,23 +329,25 @@ const ViewTaskDetails = () => {
                                     key={item._id || index}
                                     className="flex items-center gap-3 border-b border-gray-100 pb-3 last:border-0"
                                 >
-
-                                    <span className={`w-6 h-6 flex items-center justify-center rounded-full text-xs font-semibold ${
-                                        item.completed
-                                            ? "bg-green-100 text-green-700"
-                                            : "bg-gray-100 text-gray-500"
-                                    }`}>
+                                    <span
+                                        className={`w-6 h-6 flex items-center justify-center rounded-full text-xs font-semibold ${
+                                            item.completed
+                                                ? "bg-green-100 text-green-700"
+                                                : "bg-gray-100 text-gray-500"
+                                        }`}
+                                    >
                                         {item.completed ? "✓" : index + 1}
                                     </span>
 
-                                    <span className={`text-sm ${
-                                        item.completed
-                                            ? "line-through text-gray-400"
-                                            : "text-gray-700"
-                                    }`}>
+                                    <span
+                                        className={`text-sm ${
+                                            item.completed
+                                                ? "line-through text-gray-400"
+                                                : "text-gray-700"
+                                        }`}
+                                    >
                                         {item.text}
                                     </span>
-
                                 </div>
                             ))}
 
@@ -333,7 +361,6 @@ const ViewTaskDetails = () => {
                     <p className="text-sm text-gray-500 mt-5">
                         To update checklist items, go to My Tasks and use the Checklist action.
                     </p>
-
                 </div>
 
                 {/* Attachments */}
@@ -346,27 +373,38 @@ const ViewTaskDetails = () => {
                     {task.attachments?.length > 0 ? (
                         <div className="space-y-3">
 
-                            {task.attachments.map((attachment, index) => (
-                                <div
-                                    key={index}
-                                    className="flex items-center justify-between gap-3 bg-gray-50 rounded-lg p-3"
-                                >
-                                    <span className="text-sm text-gray-700 break-all">
-                                        {attachment}
-                                    </span>
+                            {task.attachments.map((attachment, index) => {
+                                const filename = attachment.split("/").pop();
 
-                                    {/^https?:\/\//i.test(attachment) && (
-                                        <a
-                                            href={attachment}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            className="text-blue-600 text-sm font-medium shrink-0"
+                                return (
+                                    <div
+                                        key={index}
+                                        className="flex items-center justify-between gap-3 bg-gray-50 rounded-lg p-3"
+                                    >
+                                        <div className="flex items-center gap-3 min-w-0">
+                                            <span className="text-xl">
+                                                📎
+                                            </span>
+
+                                            <span className="text-sm text-gray-700 break-all">
+                                                {filename}
+                                            </span>
+                                        </div>
+
+                                        <button
+                                            onClick={() =>
+                                                handleDownloadAttachment(attachment)
+                                            }
+                                            disabled={downloadingAttachment === filename}
+                                            className="text-blue-600 hover:text-blue-800 text-sm font-medium shrink-0 disabled:opacity-50"
                                         >
-                                            Open
-                                        </a>
-                                    )}
-                                </div>
-                            ))}
+                                            {downloadingAttachment === filename
+                                                ? "Downloading..."
+                                                : "Download"}
+                                        </button>
+                                    </div>
+                                );
+                            })}
 
                         </div>
                     ) : (

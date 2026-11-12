@@ -1,112 +1,169 @@
 
+const mongoose = require("mongoose");
 const Task = require("../models/Task");
+const fs = require("fs");
+const path = require("path");
 
-// @desc    Get all tasks (Admin: all, User: only assigned tasks)
-// @route   GET /api/tasks/
-// @access  Private
+// -------------------- HELPER FUNCTIONS --------------------
+
+// Validate MongoDB IDs before querying.
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+// Handle both populated users and raw ObjectIds.
+const isAssignedToUser = (task, userId) => {
+    return task.assignedTo.some((member) => {
+        const assignedId = member?._id || member;
+        return assignedId?.toString() === userId.toString();
+    });
+};
+
+// Admins can access every task; members can access assigned tasks only.
+const canAccessTask = (task, user) => {
+    return (
+        user.role === "admin" ||
+        isAssignedToUser(task, user._id)
+    );
+};
+
+const removeUploadedFiles = (files = []) => {
+    files.forEach((file) => {
+        const filePath = path.join(
+            __dirname,
+            "../uploads",
+            path.basename(file.filename)
+        );
+
+        fs.unlink(filePath, () => {});
+    });
+};
+
+const validPriorities = ["Low", "Medium", "High"];
+const validStatuses = ["Pending", "In Progress", "Completed"];
+
+// -------------------- GET ALL TASKS --------------------
+
+// @route GET /api/tasks/
+// @access Private
 const getTasks = async (req, res) => {
     try {
         const { status } = req.query;
-        let filter = {};
+
+        if (status && !validStatuses.includes(status)) {
+            return res.status(400).json({
+                message: "Invalid task status.",
+            });
+        }
+
+        const filter = {};
 
         if (status) {
             filter.status = status;
         }
 
-        let tasks;
-
-        if (req.user.role === "admin") {
-            tasks = await Task.find(filter).populate(
-                "assignedTo",
-                "name email profileImageUrl"
-            );
-        } else {
-            tasks = await Task.find({
-                ...filter,
-                assignedTo: req.user._id,
-            }).populate(
-                "assignedTo",
-                "name email profileImageUrl"
-            );
+        if (req.user.role !== "admin") {
+            filter.assignedTo = req.user._id;
         }
 
-        // Add completed todoChecklist count to each task
-        tasks = await Promise.all(
-            tasks.map(async (task) => {
-                const completedCount = task.todoChecklist.filter(
-                    (item) => item.completed
-                ).length;
+        const tasks = await Task.find(filter)
+            .populate("assignedTo", "name email profileImageUrl")
+            .sort({ createdAt: -1 });
 
-                return { ...task._doc, completedTodoCount: completedCount };
-            })
-        );
+        const formattedTasks = tasks.map((task) => {
+            const completedTodoCount = task.todoChecklist.filter(
+                (item) => item.completed
+            ).length;
 
-        // Status summary counts
-        const allTasks = await Task.countDocuments({
-            ...(req.user.role !== "admin" && { assignedTo: req.user._id })
+            return {
+                ...task.toObject(),
+                completedTodoCount,
+            };
         });
 
-        const pendingTasks = await Task.countDocuments({
-            ...filter,
-            status: "Pending",
-            ...(req.user.role !== "admin" && { assignedTo: req.user._id }),
-        });
+        const accessFilter =
+            req.user.role === "admin"
+                ? {}
+                : { assignedTo: req.user._id };
 
-        const inProgressTasks = await Task.countDocuments({
-            ...filter,
-            status: "In Progress",
-            ...(req.user.role !== "admin" && { assignedTo: req.user._id }),
-        });
+        const [allTasks, pendingTasks, inProgressTasks, completedTasks] =
+            await Promise.all([
+                Task.countDocuments(accessFilter),
+                Task.countDocuments({
+                    ...accessFilter,
+                    status: "Pending",
+                }),
+                Task.countDocuments({
+                    ...accessFilter,
+                    status: "In Progress",
+                }),
+                Task.countDocuments({
+                    ...accessFilter,
+                    status: "Completed",
+                }),
+            ]);
 
-        const completedTasks = await Task.countDocuments({
-            ...filter,
-            status: "Completed",
-            ...(req.user.role !== "admin" && { assignedTo: req.user._id }),
-        });
-
-        res.json({
-            tasks,
+        return res.status(200).json({
+            tasks: formattedTasks,
             statusSummary: {
                 all: allTasks,
                 pendingTasks,
                 inProgressTasks,
                 completedTasks,
-            }
+            },
         });
-
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Get tasks error:", error);
+
+        return res.status(500).json({
+            message: "Unable to fetch tasks.",
         });
     }
 };
 
-// @desc    Get task by ID
-// @route   GET /api/tasks/:id
-// @access  Private
+// -------------------- GET TASK BY ID --------------------
+
+// @route GET /api/tasks/:id
+// @access Private
 const getTaskById = async (req, res) => {
     try {
-        const task = await Task.findById(req.params.id).populate(
+        const { id } = req.params;
+
+        if (!isValidId(id)) {
+            return res.status(400).json({
+                message: "Invalid task ID.",
+            });
+        }
+
+        const task = await Task.findById(id).populate(
             "assignedTo",
             "name email profileImageUrl"
         );
 
-        if (!task) return res.status(404).json({ message: "Task not found" });
+        if (!task) {
+            return res.status(404).json({
+                message: "Task not found.",
+            });
+        }
 
-        res.json(task);
+        if (!canAccessTask(task, req.user)) {
+            return res.status(403).json({
+                message: "You are not authorized to access this task.",
+            });
+        }
 
+        return res.status(200).json(task);
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Get task by ID error:", error);
+
+        return res.status(500).json({
+            message: "Unable to fetch task.",
         });
     }
 };
 
-// @desc    Create a new task (Admin only)
-// @route   POST /api/tasks/
-// @access  Private (Admin)
+// -------------------- CREATE TASK --------------------
+
+// @route POST /api/tasks/
+// @access Admin only
 const createTask = async (req, res) => {
     try {
         const {
@@ -115,346 +172,817 @@ const createTask = async (req, res) => {
             priority,
             dueDate,
             assignedTo,
-            attachments,
             todoChecklist,
         } = req.body;
 
+        if (!title || typeof title !== "string" || !title.trim()) {
+            return res.status(400).json({
+                message: "Task title is required.",
+            });
+        }
+
+        if (!dueDate || Number.isNaN(Date.parse(dueDate))) {
+            return res.status(400).json({
+                message: "A valid due date is required.",
+            });
+        }
+
+        if (
+            priority !== undefined &&
+            !validPriorities.includes(priority)
+        ) {
+            return res.status(400).json({
+                message: "Invalid task priority.",
+            });
+        }
+
         if (!Array.isArray(assignedTo)) {
-            return res
-                .status(400)
-                .json({ message: "assignedTo must be an array of user IDs" });
+            return res.status(400).json({
+                message: "assignedTo must be an array of user IDs.",
+            });
+        }
+
+        if (!assignedTo.every(isValidId)) {
+            return res.status(400).json({
+                message: "One or more assigned user IDs are invalid.",
+            });
+        }
+
+        if (
+            todoChecklist !== undefined &&
+            !Array.isArray(todoChecklist)
+        ) {
+            return res.status(400).json({
+                message: "todoChecklist must be an array.",
+            });
         }
 
         const task = await Task.create({
+            title: title.trim(),
+            description:
+                typeof description === "string" ? description.trim() : "",
+            priority: priority || "Medium",
+            dueDate: new Date(dueDate),
+            assignedTo,
+            todoChecklist: todoChecklist || [],
+            attachments: [],
+            createdBy: req.user._id,
+        });
+
+        const createdTask = await Task.findById(task._id).populate(
+            "assignedTo",
+            "name email profileImageUrl"
+        );
+
+        return res.status(201).json({
+            message: "Task created successfully.",
+            task: createdTask,
+        });
+    } catch (error) {
+        console.error("Create task error:", error);
+
+        return res.status(500).json({
+            message: "Unable to create task.",
+        });
+    }
+};
+
+// -------------------- UPDATE TASK --------------------
+
+// @route PUT /api/tasks/:id
+// @access Admin only
+const updateTask = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!isValidId(id)) {
+            return res.status(400).json({
+                message: "Invalid task ID.",
+            });
+        }
+
+        const task = await Task.findById(id);
+
+        if (!task) {
+            return res.status(404).json({
+                message: "Task not found.",
+            });
+        }
+
+        const {
             title,
             description,
             priority,
             dueDate,
             assignedTo,
-            attachments,
             todoChecklist,
-            createdBy: req.user._id,
-        });
+        } = req.body;
 
-        res.status(201).json({
-            message: "Task created successfully",
-            task,
-        });
-
-    } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
-        });
-    }
-};
-
-// @desc    Update task details
-// @route   PUT /api/tasks/:id
-// @access  Private
-const updateTask = async (req, res) => {
-    try {
-        const task = await Task.findById(req.params.id);
-
-        if (!task) return res.status(404).json({ message: "Task not found" });
-
-        task.title = req.body.title || task.title;
-        task.description = req.body.description || task.description;
-        task.priority = req.body.priority || task.priority;
-        task.dueDate = req.body.dueDate || task.dueDate;
-        task.todoChecklist = req.body.todoChecklist || task.todoChecklist;
-        task.attachments = req.body.attachments || task.attachments;
-
-        if (req.body.assignedTo) {
-            if (!Array.isArray(req.body.assignedTo)) {
-                return res
-                    .status(400)
-                    .json({ message: "assignedTo must be an array of user IDs" });
+        // Validate only fields supplied by the client.
+        if (title !== undefined) {
+            if (typeof title !== "string" || !title.trim()) {
+                return res.status(400).json({
+                    message: "Task title cannot be empty.",
+                });
             }
 
-            task.assignedTo = req.body.assignedTo;
+            task.title = title.trim();
         }
 
-        const updatedTask = await task.save();
+        if (description !== undefined) {
+            if (typeof description !== "string") {
+                return res.status(400).json({
+                    message: "Description must be text.",
+                });
+            }
 
-        res.json({
-            message: "Task updated successfully",
-            updatedTask
+            task.description = description.trim();
+        }
+
+        if (priority !== undefined) {
+            if (!validPriorities.includes(priority)) {
+                return res.status(400).json({
+                    message: "Invalid task priority.",
+                });
+            }
+
+            task.priority = priority;
+        }
+
+        if (dueDate !== undefined) {
+            if (!dueDate || Number.isNaN(Date.parse(dueDate))) {
+                return res.status(400).json({
+                    message: "Invalid due date.",
+                });
+            }
+
+            task.dueDate = new Date(dueDate);
+        }
+
+        if (assignedTo !== undefined) {
+            if (
+                !Array.isArray(assignedTo) ||
+                !assignedTo.every(isValidId)
+            ) {
+                return res.status(400).json({
+                    message: "assignedTo must contain valid user IDs.",
+                });
+            }
+
+            task.assignedTo = assignedTo;
+        }
+
+        if (todoChecklist !== undefined) {
+            if (!Array.isArray(todoChecklist)) {
+                return res.status(400).json({
+                    message: "todoChecklist must be an array.",
+                });
+            }
+
+            task.todoChecklist = todoChecklist;
+
+            const completedCount = todoChecklist.filter(
+                (item) => item.completed
+            ).length;
+
+            task.progress =
+                todoChecklist.length > 0
+                    ? Math.round(
+                          (completedCount / todoChecklist.length) * 100
+                      )
+                    : 0;
+
+            if (task.progress === 100 && todoChecklist.length > 0) {
+                task.status = "Completed";
+            } else if (task.progress > 0) {
+                task.status = "In Progress";
+            } else {
+                task.status = "Pending";
+            }
+        }
+
+        // Attachments are intentionally not editable through this route.
+        // Use the dedicated attachment upload endpoint instead.
+
+        await task.save();
+
+        const updatedTask = await Task.findById(id).populate(
+            "assignedTo",
+            "name email profileImageUrl"
+        );
+
+        return res.status(200).json({
+            message: "Task updated successfully.",
+            updatedTask,
         });
-
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Update task error:", error);
+
+        return res.status(500).json({
+            message: "Unable to update task.",
         });
     }
 };
 
-// @desc    Delete a task (Admin only)
-// @route   DELETE /api/tasks/:id
-// @access  Private (Admin)
+// -------------------- DELETE TASK --------------------
+
+// @route DELETE /api/tasks/:id
+// @access Admin only
 const deleteTask = async (req, res) => {
     try {
-        const task = await Task.findById(req.params.id);
+        const { id } = req.params;
 
-        if (!task) return res.status(404).json({ message: "Task not found" });
+        if (!isValidId(id)) {
+            return res.status(400).json({
+                message: "Invalid task ID.",
+            });
+        }
+
+        const task = await Task.findById(id);
+
+        if (!task) {
+            return res.status(404).json({
+                message: "Task not found.",
+            });
+        }
+
+        // Remove attachment files when deleting the task.
+        const uploadDirectory = path.resolve(
+            __dirname,
+            "../uploads"
+        );
+
+        task.attachments.forEach((attachment) => {
+            const filename = path.basename(attachment);
+            const filePath = path.resolve(
+                uploadDirectory,
+                filename
+            );
+
+            if (
+                filePath.startsWith(uploadDirectory + path.sep) &&
+                fs.existsSync(filePath)
+            ) {
+                fs.unlink(filePath, () => {});
+            }
+        });
 
         await task.deleteOne();
 
-        res.json({ message: "Task deleted successfully" });
-
+        return res.status(200).json({
+            message: "Task deleted successfully.",
+        });
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Delete task error:", error);
+
+        return res.status(500).json({
+            message: "Unable to delete task.",
         });
     }
 };
 
-// @desc    Update task status
-// @route   PUT /api/tasks/:id/status
-// @access  Private
+// -------------------- UPDATE TASK STATUS --------------------
+
+// @route PUT /api/tasks/:id/status
+// @access Admin or assigned member
 const updateTaskStatus = async (req, res) => {
     try {
-      const task = await Task.findById(req.params.id);
+        const { id } = req.params;
+        const { status } = req.body;
 
-if (!task) return res.status(404).json({ message: "Task not found" });
+        if (!isValidId(id)) {
+            return res.status(400).json({
+                message: "Invalid task ID.",
+            });
+        }
 
-const isAssigned = task.assignedTo.some(
-    (userId) => userId.toString() === req.user._id.toString()
-);
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({
+                message: "Invalid task status.",
+            });
+        }
 
-if (!isAssigned && req.user.role !== "admin") {
-    return res.status(403).json({ message: "Not authorized" });
-}
+        const task = await Task.findById(id);
 
-task.status = req.body.status || task.status;
+        if (!task) {
+            return res.status(404).json({
+                message: "Task not found.",
+            });
+        }
 
-if (task.status === "Completed") {
-    task.todoChecklist.forEach((item) => (item.completed = true));
-    task.progress = 100;
-}
+        if (!canAccessTask(task, req.user)) {
+            return res.status(403).json({
+                message: "You are not authorized to update this task.",
+            });
+        }
 
-await task.save();
+        task.status = status;
 
-res.json({ message: "Task status updated", task });
+        if (status === "Completed") {
+            task.todoChecklist.forEach((item) => {
+                item.completed = true;
+            });
 
+            task.progress = 100;
+        } else if (status === "Pending") {
+            task.todoChecklist.forEach((item) => {
+                item.completed = false;
+            });
+
+            task.progress = 0;
+        } else if (status === "In Progress" && task.progress === 100) {
+            task.progress = 0;
+            task.todoChecklist.forEach((item) => {
+                item.completed = false;
+            });
+        }
+
+        await task.save();
+
+        const updatedTask = await Task.findById(id).populate(
+            "assignedTo",
+            "name email profileImageUrl"
+        );
+
+        return res.status(200).json({
+            message: "Task status updated successfully.",
+            task: updatedTask,
+        });
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Update task status error:", error);
+
+        return res.status(500).json({
+            message: "Unable to update task status.",
         });
     }
 };
 
-// @desc    Update task checklist
-// @route   PUT /api/tasks/:id/todo
-// @access  Private
+// -------------------- UPDATE TASK CHECKLIST --------------------
+
+// @route PUT /api/tasks/:id/todo
+// @access Admin or assigned member
 const updateTaskChecklist = async (req, res) => {
     try {
-      const { todoChecklist } = req.body;
-const task = await Task.findById(req.params.id);
+        const { id } = req.params;
+        const { todoChecklist } = req.body;
 
-if (!task) return res.status(404).json({ message: "Task not found" });
+        if (!isValidId(id)) {
+            return res.status(400).json({
+                message: "Invalid task ID.",
+            });
+        }
 
-if (!task.assignedTo.includes(req.user._id) && req.user.role !== "admin") {
-    return res
-        .status(403)
-        .json({ message: "Not authorized to update checklist" });
-}
+        if (!Array.isArray(todoChecklist)) {
+            return res.status(400).json({
+                message: "todoChecklist must be an array.",
+            });
+        }
 
-task.todoChecklist = todoChecklist; // Replace with updated checklist
+        const validChecklist = todoChecklist.every(
+            (item) =>
+                item &&
+                typeof item.text === "string" &&
+                item.text.trim() &&
+                typeof item.completed === "boolean"
+        );
 
-// Auto-update progress based on checklist completion
-const completedCount = task.todoChecklist.filter(
-    (item) => item.completed
-).length;
+        if (!validChecklist) {
+            return res.status(400).json({
+                message: "Each checklist item needs text and a completed value.",
+            });
+        }
 
-const totalItems = task.todoChecklist.length;
+        const task = await Task.findById(id);
 
-task.progress =
-    totalItems > 0 ? Math.round((completedCount / totalItems) * 100) : 0;
+        if (!task) {
+            return res.status(404).json({
+                message: "Task not found.",
+            });
+        }
 
-// Auto-mark task as completed if all items are checked
-if (task.progress === 100) {
-    task.status = "Completed";
-} else if (task.progress > 0) {
-    task.status = "In Progress";
-} else {
-    task.status = "Pending";
-}
+        if (!canAccessTask(task, req.user)) {
+            return res.status(403).json({
+                message: "You are not authorized to update this checklist.",
+            });
+        }
 
-await task.save();
+        task.todoChecklist = todoChecklist;
 
-const updatedTask = await Task.findById(req.params.id).populate(
-    "assignedTo",
-    "name email profileImageUrl"
-);
+        const completedCount = todoChecklist.filter(
+            (item) => item.completed
+        ).length;
 
-res.json({ message: "Task checklist updated", task: updatedTask });
+        task.progress =
+            todoChecklist.length > 0
+                ? Math.round(
+                      (completedCount / todoChecklist.length) * 100
+                  )
+                : 0;
 
+        if (task.progress === 100 && todoChecklist.length > 0) {
+            task.status = "Completed";
+        } else if (task.progress > 0) {
+            task.status = "In Progress";
+        } else {
+            task.status = "Pending";
+        }
+
+        await task.save();
+
+        const updatedTask = await Task.findById(id).populate(
+            "assignedTo",
+            "name email profileImageUrl"
+        );
+
+        return res.status(200).json({
+            message: "Task checklist updated successfully.",
+            task: updatedTask,
+        });
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Update checklist error:", error);
+
+        return res.status(500).json({
+            message: "Unable to update task checklist.",
         });
     }
 };
 
-// @desc    Dashboard Data (Admin only)
-// @route   GET /api/tasks/dashboard-data
-// @access  Private
+// -------------------- ADMIN DASHBOARD --------------------
+
+// @route GET /api/tasks/dashboard-data
+// @access Admin only
 const getDashboardData = async (req, res) => {
     try {
-      // Fetch statistics
-const totalTasks = await Task.countDocuments();
-const pendingTasks = await Task.countDocuments({ status: "Pending" });
-const completedTasks = await Task.countDocuments({ status: "Completed" });
-const overdueTasks = await Task.countDocuments({
-    status: { $ne: "Completed" },
-    dueDate: { $lt: new Date() },
-});
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                message: "Only administrators can access this dashboard.",
+            });
+        }
 
-// Ensure all possible statuses are included
-const taskStatuses = ["Pending", "In Progress", "Completed"];
+        const [
+            totalTasks,
+            pendingTasks,
+            completedTasks,
+            overdueTasks,
+            taskDistributionRaw,
+            taskPriorityLevelsRaw,
+            recentTasks,
+        ] = await Promise.all([
+            Task.countDocuments(),
+            Task.countDocuments({ status: "Pending" }),
+            Task.countDocuments({ status: "Completed" }),
+            Task.countDocuments({
+                status: { $ne: "Completed" },
+                dueDate: { $lt: new Date() },
+            }),
+            Task.aggregate([
+                {
+                    $group: {
+                        _id: "$status",
+                        count: { $sum: 1 },
+                    },
+                },
+            ]),
+            Task.aggregate([
+                {
+                    $group: {
+                        _id: "$priority",
+                        count: { $sum: 1 },
+                    },
+                },
+            ]),
+            Task.find()
+                .sort({ createdAt: -1 })
+                .limit(10)
+                .select("title status priority dueDate createdAt"),
+        ]);
 
-const taskDistributionRaw = await Task.aggregate([
-    {
-        $group: {
-            _id: "$status",
-            count: { $sum: 1 },
-        },
-    },
-]);
+        const taskStatuses = [
+            "Pending",
+            "In Progress",
+            "Completed",
+        ];
 
-const taskDistribution = taskStatuses.reduce((acc, status) => {
-    const formattedKey = status.replace(/\s+/g, "");
-    acc[formattedKey] = taskDistributionRaw.find(
-        (item) => item._id === status
-    )?.count || 0;
-    return acc;
-}, {});
+        const taskDistribution = taskStatuses.reduce(
+            (acc, status) => {
+                const key = status.replace(/\s+/g, "");
 
-// Ensure all priority levels are included
-const taskPriorities = ["Low", "Medium", "High"];
+                acc[key] =
+                    taskDistributionRaw.find(
+                        (item) => item._id === status
+                    )?.count || 0;
 
-const taskPriorityLevelsRaw = await Task.aggregate([
-    {
-        $group: {
-            _id: "$priority",
-            count: { $sum: 1 },
-        },
-    },
-]);
+                return acc;
+            },
+            {}
+        );
 
-const taskPriorityLevels = taskPriorities.reduce((acc, priority) => {
-    acc[priority] =
-        taskPriorityLevelsRaw.find((item) => item._id === priority)?.count || 0;
-        return acc;
-},{})
-   // Fetch recent 10 tasks
-const recentTasks = await Task.find()
-    .sort({ createdAt: -1 })
-    .limit(10)
-    .select("title status priority dueDate createdAt");
+        const taskPriorities = ["Low", "Medium", "High"];
 
-res.status(200).json({
-    statistics: {
-        totalTasks,
-        pendingTasks,
-        completedTasks,
-        overdueTasks,
-    },
-    charts: {
-        taskDistribution,
-        taskPriorityLevels,
-    },
-    recentTasks,
-});
+        const taskPriorityLevels = taskPriorities.reduce(
+            (acc, priority) => {
+                acc[priority] =
+                    taskPriorityLevelsRaw.find(
+                        (item) => item._id === priority
+                    )?.count || 0;
 
+                return acc;
+            },
+            {}
+        );
+
+        return res.status(200).json({
+            statistics: {
+                totalTasks,
+                pendingTasks,
+                completedTasks,
+                overdueTasks,
+            },
+            charts: {
+                taskDistribution,
+                taskPriorityLevels,
+            },
+            recentTasks,
+        });
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Admin dashboard error:", error);
+
+        return res.status(500).json({
+            message: "Unable to fetch admin dashboard data.",
         });
     }
 };
 
-// @desc    Dashboard Data (User-specific)
-// @route   GET /api/tasks/user-dashboard-data
-// @access  Private
+// -------------------- MEMBER DASHBOARD --------------------
+
+// @route GET /api/tasks/user-dashboard-data
+// @access Private
 const getUserDashboardData = async (req, res) => {
     try {
-    const userId = req.user._id; // Only fetch data for the logged-in user
+        const userId = req.user._id;
+        const userFilter = { assignedTo: userId };
 
-    // Fetch statistics for user-specific tasks
-    const totalTasks = await Task.countDocuments({ assignedTo: userId });
-    const pendingTasks = await Task.countDocuments({ assignedTo: userId, status: "Pending" });
-    const completedTasks = await Task.countDocuments({ assignedTo: userId, status: "Completed" });
-    const overdueTasks = await Task.countDocuments({
-        assignedTo: userId,
-        status: { $ne: "Completed" },
-        dueDate: { $lt: new Date() },
-    });
+        const [
+            totalTasks,
+            pendingTasks,
+            completedTasks,
+            overdueTasks,
+            taskDistributionRaw,
+            taskPriorityLevelsRaw,
+            recentTasks,
+        ] = await Promise.all([
+            Task.countDocuments(userFilter),
+            Task.countDocuments({
+                ...userFilter,
+                status: "Pending",
+            }),
+            Task.countDocuments({
+                ...userFilter,
+                status: "Completed",
+            }),
+            Task.countDocuments({
+                ...userFilter,
+                status: { $ne: "Completed" },
+                dueDate: { $lt: new Date() },
+            }),
+            Task.aggregate([
+                { $match: { assignedTo: userId } },
+                {
+                    $group: {
+                        _id: "$status",
+                        count: { $sum: 1 },
+                    },
+                },
+            ]),
+            Task.aggregate([
+                { $match: { assignedTo: userId } },
+                {
+                    $group: {
+                        _id: "$priority",
+                        count: { $sum: 1 },
+                    },
+                },
+            ]),
+            Task.find(userFilter)
+                .sort({ createdAt: -1 })
+                .limit(10)
+                .select("title status priority dueDate createdAt"),
+        ]);
 
-   // Task distribution by status
-const taskStatuses = ["Pending", "In Progress", "Completed"];
+        const taskStatuses = [
+            "Pending",
+            "In Progress",
+            "Completed",
+        ];
 
-const taskDistributionRaw = await Task.aggregate([
-    { $match: { assignedTo: userId } },
-    { $group: { _id: "$status", count: { $sum: 1 } } },
-]);
+        const taskDistribution = taskStatuses.reduce(
+            (acc, status) => {
+                const key = status.replace(/\s+/g, "");
 
-const taskDistribution = taskStatuses.reduce((acc, status) => {
-    const formattedKey = status.replace(/\s+/g, "");
-    acc[formattedKey] =
-        taskDistributionRaw.find((item) => item._id === status)?.count || 0;
-    return acc;
-}, {});
+                acc[key] =
+                    taskDistributionRaw.find(
+                        (item) => item._id === status
+                    )?.count || 0;
 
-taskDistribution["All"] = totalTasks;
+                return acc;
+            },
+            {}
+        );
 
-// Task distribution by priority
-const taskPriorities = ["Low", "Medium", "High"];
+        taskDistribution.All = totalTasks;
 
-const taskPriorityLevelsRaw = await Task.aggregate([
-    { $match: { assignedTo: userId } },
-    { $group: { _id: "$priority", count: { $sum: 1 } } },
-]);
-  
-const taskPriorityLevels = taskPriorities.reduce((acc, priority) => {
-    acc[priority] =
-        taskPriorityLevelsRaw.find((item) => item._id === priority)?.count || 0;
-    return acc;
-}, {});
+        const taskPriorities = ["Low", "Medium", "High"];
 
-// Fetch recent 10 tasks for the logged-in user
-const recentTasks = await Task.find({ assignedTo: userId })
-    .sort({ createdAt: -1 })
-    .limit(10)
-    .select("title status priority dueDate createdAt");
+        const taskPriorityLevels = taskPriorities.reduce(
+            (acc, priority) => {
+                acc[priority] =
+                    taskPriorityLevelsRaw.find(
+                        (item) => item._id === priority
+                    )?.count || 0;
 
-res.status(200).json({
-    statistics: {
-        totalTasks,
-        pendingTasks,
-        completedTasks,
-        overdueTasks,
-    },
-    charts: {
-        taskDistribution,
-        taskPriorityLevels,
-    },
-    recentTasks,
-});
+                return acc;
+            },
+            {}
+        );
 
+        return res.status(200).json({
+            statistics: {
+                totalTasks,
+                pendingTasks,
+                completedTasks,
+                overdueTasks,
+            },
+            charts: {
+                taskDistribution,
+                taskPriorityLevels,
+            },
+            recentTasks,
+        });
     } catch (error) {
-        res.status(500).json({
-            message: "Server error",
-            error: error.message
+        console.error("Member dashboard error:", error);
+
+        return res.status(500).json({
+            message: "Unable to fetch member dashboard data.",
         });
     }
 };
+
+// -------------------- UPLOAD TASK ATTACHMENTS --------------------
+
+// @route POST /api/tasks/:id/attachments
+// @access Admin only
+const uploadTaskAttachments = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!isValidId(id)) {
+            removeUploadedFiles(req.files);
+
+            return res.status(400).json({
+                message: "Invalid task ID.",
+            });
+        }
+
+        const task = await Task.findById(id);
+
+        if (!task) {
+            removeUploadedFiles(req.files);
+
+            return res.status(404).json({
+                message: "Task not found.",
+            });
+        }
+
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({
+                message: "Please select at least one file.",
+            });
+        }
+
+        // Maximum of five attachments per request and five MB per file
+        // are also enforced in the Multer configuration.
+        const uploadedFiles = req.files.map(
+            (file) => `/uploads/${path.basename(file.filename)}`
+        );
+
+        task.attachments.push(...uploadedFiles);
+
+        await task.save();
+
+        const updatedTask = await Task.findById(id).populate(
+            "assignedTo",
+            "name email profileImageUrl"
+        );
+
+        return res.status(200).json({
+            message: "Attachments uploaded successfully.",
+            attachments: task.attachments,
+            task: updatedTask,
+        });
+    } catch (error) {
+        removeUploadedFiles(req.files);
+
+        console.error("Attachment upload error:", error);
+
+        return res.status(500).json({
+            message: "Attachment upload failed.",
+        });
+    }
+};
+
+// -------------------- DOWNLOAD TASK ATTACHMENT --------------------
+
+// @route GET /api/tasks/:id/attachments/:filename
+// @access Admin or assigned member
+const downloadTaskAttachment = async (req, res) => {
+    try {
+        const { id, filename } = req.params;
+
+        if (!isValidId(id)) {
+            return res.status(400).json({
+                message: "Invalid task ID.",
+            });
+        }
+
+        // Accept only a plain filename, never a path.
+        if (
+            !filename ||
+            filename !== path.basename(filename) ||
+            filename.includes("..")
+        ) {
+            return res.status(400).json({
+                message: "Invalid attachment filename.",
+            });
+        }
+
+        const task = await Task.findById(id);
+
+        if (!task) {
+            return res.status(404).json({
+                message: "Task not found.",
+            });
+        }
+
+        if (!canAccessTask(task, req.user)) {
+            return res.status(403).json({
+                message: "You are not authorized to access this attachment.",
+            });
+        }
+
+        const attachmentExists = task.attachments.some(
+            (attachment) =>
+                path.basename(attachment) === filename
+        );
+
+        if (!attachmentExists) {
+            return res.status(404).json({
+                message: "Attachment not found.",
+            });
+        }
+
+        const uploadDirectory = path.resolve(
+            __dirname,
+            "../uploads"
+        );
+
+        const filePath = path.resolve(
+            uploadDirectory,
+            filename
+        );
+
+        if (!filePath.startsWith(uploadDirectory + path.sep)) {
+            return res.status(400).json({
+                message: "Invalid file path.",
+            });
+        }
+
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({
+                message: "File not found on server.",
+            });
+        }
+
+        return res.download(filePath, filename, (error) => {
+            if (error && !res.headersSent) {
+                console.error("Attachment download error:", error);
+
+                res.status(500).json({
+                    message: "Unable to download attachment.",
+                });
+            }
+        });
+    } catch (error) {
+        console.error("Download attachment error:", error);
+
+        if (!res.headersSent) {
+            return res.status(500).json({
+                message: "Unable to download attachment.",
+            });
+        }
+    }
+};
+
+// -------------------- EXPORT CONTROLLERS --------------------
 
 module.exports = {
     getTasks,
@@ -466,4 +994,6 @@ module.exports = {
     updateTaskChecklist,
     getDashboardData,
     getUserDashboardData,
+    uploadTaskAttachments,
+    downloadTaskAttachment,
 };
